@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 )
 
 type Configuration struct {
@@ -37,33 +38,32 @@ func main() {
 	configfile := flag.String("cfg", "streamer.cfg", "Configuration file")
 	flag.Parse()
 	config := configure(*configfile)
-	fmt.Println(config)
 	remoteBinlogs := getRemoteBinlogs(config)
 	localBinlogs := getLocalBinlogs(config)
 	missingBinlogs := checkMissingBinlogs(config, localBinlogs, remoteBinlogs)
-	fmt.Println(missingBinlogs)
 	streamBinlogs(config, missingBinlogs)
+	for {
+	}
 }
 
 func streamBinlogs(config *Configuration, binlogs []Binlog) {
-	streamerCmd := fmt.Sprint(config.mysqlbinlog,
-		" --raw ",
-		" --read-from-remote-server ",
-		" --stop-never ",
+	streamerCmd := fmt.Sprint(
+		config.mysqlbinlog,
+		" --raw",
+		" --read-from-remote-server",
+		" --stop-never",
 		" --host=", config.mysqlhost,
-		" --port=", config.mysqlport,
+		" --port=", strconv.Itoa(config.mysqlport),
 		" --user=", config.mysqluser,
 		" --password=", config.mysqlpass,
-		" --result-file=", config.binlogdir, "/",
+		" --result-file=", config.binlogdir, " ",
 		binlogs[0].filename,
 	)
-	streamer := exec.Command(streamerCmd)
-	streamerOut, err := streamer.Output()
+	streamer := exec.Command("bash", "-c", streamerCmd)
+	_, err := streamer.Output()
 	if err != nil {
 		panic(err)
 	}
-    fmt.Println(streamerOut)
-
 }
 
 func checkMissingBinlogs(config *Configuration, local, remote []Binlog) []Binlog {
@@ -111,7 +111,6 @@ func getRemoteBinlogs(config *Configuration) []Binlog {
 	var fileSize int64
 
 	connecturi := fmt.Sprint(config.mysqluser, ":", config.mysqlpass, "@tcp(", config.mysqlhost, ":", config.mysqlport, ")/", config.mysqldb)
-	fmt.Println(connecturi)
 	db, err := sql.Open("mysql", connecturi)
 	if err != nil {
 		fmt.Println(err.Error())
