@@ -9,12 +9,13 @@ Tool for creating streamed binlog backup with mysqlbinlog utility
 
 The application uses the following config file
 
-    mysqlhost   = mysql.host.to.connect
-    mysqluser   = mysql.user.with.replication.slave.privileges
-    mysqlpass   = password.for.the.given.user
-    mysqldb     = database.connect.to
-    binlogdir   = /directory/where/you/want/to/keep/your/saved/binlogs
-    mysqlbinlog = /full/path/of/the/mysql/binlog/utility
+    mysqlhost   = mysqlhost
+    mysqluser   = user.with.replication.client.rights
+    mysqlpass   = password
+    mysqldb     = db.to.connect
+    binlogdir   = /path/to/binlogs
+    mysqlbinlog = /path/to/mysqlbinlog
+    keep_days   = 0 # if zero, no binlogs will be cleaned up
 
 ## How it is works
 
