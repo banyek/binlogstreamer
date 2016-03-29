@@ -107,6 +107,8 @@ func streamBinlogs(config *Configuration, binlogs []Binlog) {
 	if err != nil {
 		panic(err)
 	}
+	logger.Error("mysqlbinlog utility quit (maybe the remote server is restarted?)")
+	os.Exit(1)
 }
 
 func checkMissingBinlogs(config *Configuration, local, remote []Binlog) []Binlog {
