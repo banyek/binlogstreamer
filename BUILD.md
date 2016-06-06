@@ -1,10 +1,10 @@
-# How to build mambo
+# How to build binlogstreamer
 
 For building this project you can simply use GNU make.
 
-### Build the mambo for the current architecture
-If you want to build mambo for your current architecture, you can do that with a simple make command. 
-This will download all the dependencies, and builds mambo binary
+### Build the binlogstreamer for the current architecture
+If you want to build binlogstreamer for your current architecture, you can do that with a simple make command. 
+This will download all the dependencies, and builds binlogstreamer binary
 
     > make
 
