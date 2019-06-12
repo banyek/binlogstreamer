@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-type Configuration struct {
+type Streamer struct {
 	mysqlhost   string // MySQL host to connect, if empty local socket will be used
 	mysqluser   string // User to connect MySQL with
 	mysqlpass   string // Password for connecting MySQL
@@ -40,25 +40,30 @@ var (
 )
 
 func main() {
-	configfile := flag.String("cfg", "binlogstreamer.cfg", "Configuration file")
+	cfg := flag.String("cfg", "binlogstreamer.cfg", "Configuration file")
 	flag.Parse()
 	logger.Notice("Binlogstreamer started")
-	logger.Notice("Loading configuration from %s", *configfile)
-	config := configure(*configfile)
-	remoteBinlogs := getRemoteBinlogs(config)
-	localBinlogs := getLocalBinlogs(config)
-	missingBinlogs := checkMissingBinlogs(config, localBinlogs, remoteBinlogs)
-	go streamBinlogs(config, missingBinlogs)
-	cleanupBinlogs(config)
-	tick := time.NewTicker(time.Millisecond * 600000).C
-	for {
-		select {
-		case <-tick:
-			cleanupBinlogs(config)
+	logger.Notice("Loading configuration from %s", *cfg)
+	streamers := configure(*cfg)
+	for _, streamer := range streamers {
+		remoteBinlogs := getRemoteBinlogs(streamer)
+		localBinlogs := getLocalBinlogs(streamer)
+		missingBinlogs := checkMissingBinlogs(streamer, localBinlogs, remoteBinlogs)
+		go streamBinlogs(streamer, missingBinlogs)
+		cleanupBinlogs(streamer)
+		tick := time.NewTicker(time.Millisecond * 600000).C
+		for {
+			select {
+			case <-tick:
+				cleanupBinlogs(streamer)
+			}
 		}
 	}
+	
+	
+	
 }
-func cleanupBinlogs(config *Configuration) {
+func cleanupBinlogs(config Streamer) {
 	if config.daysKeep == 0 {
 		return
 	}
@@ -87,7 +92,7 @@ func cleanupBinlogs(config *Configuration) {
 	}
 }
 
-func streamBinlogs(config *Configuration, binlogs []Binlog) {
+func streamBinlogs(config Streamer, binlogs []Binlog) {
 	streamerCmd := fmt.Sprint(
 		config.mysqlbinlog,
 		" --raw",
@@ -111,7 +116,7 @@ func streamBinlogs(config *Configuration, binlogs []Binlog) {
 	os.Exit(1)
 }
 
-func checkMissingBinlogs(config *Configuration, local, remote []Binlog) []Binlog {
+func checkMissingBinlogs(config Streamer, local, remote []Binlog) []Binlog {
 	var match bool
 	var missing []Binlog
 	for _, r := range remote {
@@ -138,7 +143,7 @@ func checkMissingBinlogs(config *Configuration, local, remote []Binlog) []Binlog
 	return missing
 }
 
-func getLocalBinlogs(config *Configuration) []Binlog {
+func getLocalBinlogs(config Streamer) []Binlog {
 	logger.Notice("Checking locally existing binlogs")
 	files, err := ioutil.ReadDir(config.binlogdir)
 	if err != nil {
@@ -154,7 +159,7 @@ func getLocalBinlogs(config *Configuration) []Binlog {
 	return localBinlogs
 }
 
-func getRemoteBinlogs(config *Configuration) []Binlog {
+func getRemoteBinlogs(config Streamer) []Binlog {
 	var logName string
 	var fileSize int64
 
@@ -181,26 +186,34 @@ func getRemoteBinlogs(config *Configuration) []Binlog {
 	return remoteBinlogs
 }
 
-func configure(configfile string) *Configuration {
+func configure(configfile string) []Streamer {
+	var streamers []Streamer
 	cfg, err := ini.Load(configfile)
 	if err != nil {
 		fmt.Println(err.Error())
 	}
-	portnum, _ := cfg.Section("DEFAULT").Key("mysqlport").Int()
-	if portnum == 0 {
-		portnum = 3306
+	sections := cfg.Sections()
+	for _, section := range sections {
+		if section.Name() != "DEFAULT" { // skip unnamed section
+			portnum, _ := section.Key("mysqlport").Int()
+			if portnum == 0 {
+				portnum = 3306
+			}
+			keep, _ := section.Key("keep_days").Int64()
+			streamercfg := Streamer{
+				mysqlhost:   section.Key("mysqlhost").String(),
+				mysqluser:   section.Key("mysqluser").String(),
+				mysqlpass:   section.Key("mysqlpass").String(),
+				mysqldb:     section.Key("mysqldb").String(),
+				mysqlport:   portnum,
+				binlogdir:   section.Key("binlogdir").String(),
+				mysqlbinlog: section.Key("mysqlbinlog").String(),
+				daysKeep:    keep,
+			}
+			streamers = append (streamers, streamercfg)
+			logger.Notice("Configuration loaded successfully")
+		} 
 	}
-	keep, _ := cfg.Section("DEFAULT").Key("keep_days").Int64()
-	retcfg := Configuration{
-		mysqlhost:   cfg.Section("DEFAULT").Key("mysqlhost").String(),
-		mysqluser:   cfg.Section("DEFAULT").Key("mysqluser").String(),
-		mysqlpass:   cfg.Section("DEFAULT").Key("mysqlpass").String(),
-		mysqldb:     cfg.Section("DEFAULT").Key("mysqldb").String(),
-		mysqlport:   portnum,
-		binlogdir:   cfg.Section("DEFAULT").Key("binlogdir").String(),
-		mysqlbinlog: cfg.Section("DEFAULT").Key("mysqlbinlog").String(),
-		daysKeep:    keep,
-	}
-	logger.Notice("Configuration loaded successfully")
-	return &retcfg
+	return streamers
 }
+
