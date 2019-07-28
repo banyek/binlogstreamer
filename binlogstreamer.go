@@ -17,6 +17,7 @@ import (
 )
 
 type Streamer struct {
+	streamname  string // name of the streamer
 	mysqlhost   string // MySQL host to connect, if empty local socket will be used
 	mysqluser   string // User to connect MySQL with
 	mysqlpass   string // Password for connecting MySQL
@@ -25,6 +26,9 @@ type Streamer struct {
 	binlogdir   string // Directory to keep binlogs
 	mysqlbinlog string // mysqlbinlog binary with full path
 	daysKeep    int64  // days to keep binlogs
+    remoteBinlogs []Binlog
+    localBinlogs []Binlog
+    missingBinlogs []Binlog
 }
 
 type Binlog struct {
@@ -33,9 +37,6 @@ type Binlog struct {
 }
 
 var (
-	remoteBinlogs  []Binlog
-	localBinlogs   []Binlog
-	missingBinlogs []Binlog
 	logger         = logging.NewLogger("binlogstreamer")
 )
 
@@ -46,10 +47,11 @@ func main() {
 	logger.Notice("Loading configuration from %s", *cfg)
 	streamers := configure(*cfg)
 	for _, streamer := range streamers {
-		remoteBinlogs := getRemoteBinlogs(streamer)
-		localBinlogs := getLocalBinlogs(streamer)
-		missingBinlogs := checkMissingBinlogs(streamer, localBinlogs, remoteBinlogs)
-		go streamBinlogs(streamer, missingBinlogs)
+		print(streamer.streamname)
+		streamer.remoteBinlogs = getRemoteBinlogs(streamer)
+		streamer.localBinlogs = getLocalBinlogs(streamer)
+		streamer.missingBinlogs = checkMissingBinlogs(streamer)
+		go streamBinlogs(streamer)
 		cleanupBinlogs(streamer)
 		tick := time.NewTicker(time.Millisecond * 600000).C
 		for {
@@ -59,9 +61,7 @@ func main() {
 			}
 		}
 	}
-	
-	
-	
+
 }
 func cleanupBinlogs(config Streamer) {
 	if config.daysKeep == 0 {
@@ -92,7 +92,7 @@ func cleanupBinlogs(config Streamer) {
 	}
 }
 
-func streamBinlogs(config Streamer, binlogs []Binlog) {
+func streamBinlogs(config Streamer) {
 	streamerCmd := fmt.Sprint(
 		config.mysqlbinlog,
 		" --raw",
@@ -103,10 +103,10 @@ func streamBinlogs(config Streamer, binlogs []Binlog) {
 		" --user=", config.mysqluser,
 		" --password=", config.mysqlpass,
 		" --result-file=", config.binlogdir, " ",
-		binlogs[0].filename,
+		config.missingBinlogs[0].filename,
 	)
 	logger.Notice("Starting binlog streaming from %s", config.mysqlhost)
-	logger.Notice("First binlog: %s", binlogs[0].filename)
+	logger.Notice("First binlog: %s", config.missingBinlogs[0].filename)
 	streamer := exec.Command("bash", "-c", streamerCmd)
 	_, err := streamer.Output()
 	if err != nil {
@@ -116,12 +116,12 @@ func streamBinlogs(config Streamer, binlogs []Binlog) {
 	os.Exit(1)
 }
 
-func checkMissingBinlogs(config Streamer, local, remote []Binlog) []Binlog {
+func checkMissingBinlogs(config Streamer) []Binlog {
 	var match bool
 	var missing []Binlog
-	for _, r := range remote {
+	for _, r := range config.remoteBinlogs {
 		match = false
-		for _, l := range local {
+		for _, l := range config.localBinlogs {
 			if l.filename == r.filename {
 				match = true
 				if l.filesize != r.filesize {
@@ -144,6 +144,7 @@ func checkMissingBinlogs(config Streamer, local, remote []Binlog) []Binlog {
 }
 
 func getLocalBinlogs(config Streamer) []Binlog {
+    var localBinlogs []Binlog
 	logger.Notice("Checking locally existing binlogs")
 	files, err := ioutil.ReadDir(config.binlogdir)
 	if err != nil {
@@ -162,6 +163,7 @@ func getLocalBinlogs(config Streamer) []Binlog {
 func getRemoteBinlogs(config Streamer) []Binlog {
 	var logName string
 	var fileSize int64
+    var remoteBinlogs []Binlog
 
 	logger.Notice("Checking remote binary logs")
 	connecturi := fmt.Sprint(config.mysqluser, ":", config.mysqlpass, "@tcp(", config.mysqlhost, ":", config.mysqlport, ")/", config.mysqldb)
@@ -201,6 +203,7 @@ func configure(configfile string) []Streamer {
 			}
 			keep, _ := section.Key("keep_days").Int64()
 			streamercfg := Streamer{
+				streamname:  section.Name(),
 				mysqlhost:   section.Key("mysqlhost").String(),
 				mysqluser:   section.Key("mysqluser").String(),
 				mysqlpass:   section.Key("mysqlpass").String(),
@@ -210,10 +213,9 @@ func configure(configfile string) []Streamer {
 				mysqlbinlog: section.Key("mysqlbinlog").String(),
 				daysKeep:    keep,
 			}
-			streamers = append (streamers, streamercfg)
+			streamers = append(streamers, streamercfg)
 			logger.Notice("Configuration loaded successfully")
-		} 
+		}
 	}
 	return streamers
 }
-
