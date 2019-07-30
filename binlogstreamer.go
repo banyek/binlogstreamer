@@ -17,18 +17,18 @@ import (
 )
 
 type Streamer struct {
-	streamname  string // name of the streamer
-	mysqlhost   string // MySQL host to connect, if empty local socket will be used
-	mysqluser   string // User to connect MySQL with
-	mysqlpass   string // Password for connecting MySQL
-	mysqldb     string // Database to connect to
-	mysqlport   int    // Port to connect MySQL, if left blank, 3306 will be used as default
-	binlogdir   string // Directory to keep binlogs
-	mysqlbinlog string // mysqlbinlog binary with full path
-	daysKeep    int64  // days to keep binlogs
-    remoteBinlogs []Binlog
-    localBinlogs []Binlog
-    missingBinlogs []Binlog
+	streamname     string // name of the streamer
+	mysqlhost      string // MySQL host to connect, if empty local socket will be used
+	mysqluser      string // User to connect MySQL with
+	mysqlpass      string // Password for connecting MySQL
+	mysqldb        string // Database to connect to
+	mysqlport      int    // Port to connect MySQL, if left blank, 3306 will be used as default
+	binlogdir      string // Directory to keep binlogs
+	mysqlbinlog    string // mysqlbinlog binary with full path
+	daysKeep       int64  // days to keep binlogs
+	remoteBinlogs  []Binlog
+	localBinlogs   []Binlog
+	missingBinlogs []Binlog
 }
 
 type Binlog struct {
@@ -37,7 +37,7 @@ type Binlog struct {
 }
 
 var (
-	logger         = logging.NewLogger("binlogstreamer")
+	logger = logging.NewLogger("binlogstreamer")
 )
 
 func main() {
@@ -51,6 +51,7 @@ func main() {
 		streamer.remoteBinlogs = getRemoteBinlogs(streamer)
 		streamer.localBinlogs = getLocalBinlogs(streamer)
 		streamer.missingBinlogs = checkMissingBinlogs(streamer)
+		fmt.Println("%+v\n", streamer)
 		go streamBinlogs(streamer)
 		cleanupBinlogs(streamer)
 		tick := time.NewTicker(time.Millisecond * 600000).C
@@ -140,11 +141,24 @@ func checkMissingBinlogs(config Streamer) []Binlog {
 			missing = append(missing, r)
 		}
 	}
+    // This part is not too nice: if all the binlogs are exist locally, and their size is same, we don't should remove the last one
+    // and start streaming again from that, as it is easier than scanning through the binlog, and seeking for a position to start with
+	if len(missing) == 0 {
+		lastbinlog := config.localBinlogs[len(config.localBinlogs)-1]
+		logger.Warning("No binlogs are missing, removing last one, and start streaming again")
+		logger.Notice("Renaming %s", lastbinlog.filename)
+		err := os.Rename(fmt.Sprint(config.binlogdir, "/", lastbinlog.filename), fmt.Sprint(config.binlogdir, "/", lastbinlog.filename, "_redownload"))
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+		missing = append(missing, lastbinlog)
+
+	}
 	return missing
 }
 
 func getLocalBinlogs(config Streamer) []Binlog {
-    var localBinlogs []Binlog
+	var localBinlogs []Binlog
 	logger.Notice("Checking locally existing binlogs")
 	files, err := ioutil.ReadDir(config.binlogdir)
 	if err != nil {
@@ -163,7 +177,7 @@ func getLocalBinlogs(config Streamer) []Binlog {
 func getRemoteBinlogs(config Streamer) []Binlog {
 	var logName string
 	var fileSize int64
-    var remoteBinlogs []Binlog
+	var remoteBinlogs []Binlog
 
 	logger.Notice("Checking remote binary logs")
 	connecturi := fmt.Sprint(config.mysqluser, ":", config.mysqlpass, "@tcp(", config.mysqlhost, ":", config.mysqlport, ")/", config.mysqldb)
