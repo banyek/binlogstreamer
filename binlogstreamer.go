@@ -47,20 +47,20 @@ func main() {
 	logger.Notice("Loading configuration from %s", *cfg)
 	streamers := configure(*cfg)
 	for _, streamer := range streamers {
-		print(streamer.streamname)
 		streamer.remoteBinlogs = getRemoteBinlogs(streamer)
 		streamer.localBinlogs = getLocalBinlogs(streamer)
 		streamer.missingBinlogs = checkMissingBinlogs(streamer)
-		fmt.Println("%+v\n", streamer)
 		go streamBinlogs(streamer)
-		cleanupBinlogs(streamer)
-		tick := time.NewTicker(time.Millisecond * 600000).C
-		for {
-			select {
-			case <-tick:
-				cleanupBinlogs(streamer)
-			}
-		}
+		//		cleanupBinlogs(streamer)
+		//		tick := time.NewTicker(time.Millisecond * 600000).C
+		//		for {
+		//			select {
+		//			case <-tick:
+		//				cleanupBinlogs(streamer)
+		//			}
+		//		}
+	}
+	for {
 	}
 
 }
@@ -106,15 +106,17 @@ func streamBinlogs(config Streamer) {
 		" --result-file=", config.binlogdir, " ",
 		config.missingBinlogs[0].filename,
 	)
-	logger.Notice("Starting binlog streaming from %s", config.mysqlhost)
-	logger.Notice("First binlog: %s", config.missingBinlogs[0].filename)
+	logger.Notice("%s: Starting binlog streaming from %s", config.streamname, config.mysqlhost)
+	logger.Notice("%s: First binlog: %s", config.streamname, config.missingBinlogs[0].filename)
 	streamer := exec.Command("bash", "-c", streamerCmd)
 	_, err := streamer.Output()
 	if err != nil {
-		panic(err)
+		//panic(err)
+        logger.Error("%s: %s", config.streamname, err)
+        logger.Error("%s: streamer command was: %s", config.streamname, streamerCmd)
 	}
-	logger.Error("mysqlbinlog utility quit (maybe the remote server is restarted?)")
-	os.Exit(1)
+	logger.Error("%s: mysqlbinlog utility quit (maybe the remote server is restarted?)", config.streamname)
+	//os.Exit(1)
 }
 
 func checkMissingBinlogs(config Streamer) []Binlog {
@@ -126,8 +128,8 @@ func checkMissingBinlogs(config Streamer) []Binlog {
 			if l.filename == r.filename {
 				match = true
 				if l.filesize != r.filesize {
-					logger.Warning("Binlog %s already exists locally, but its size is differs.", l.filename)
-					logger.Notice("Renaming to %s_incomplete", l.filename)
+					logger.Warning("%s: Binlog %s already exists locally, but its size is differs.", config.streamname, l.filename)
+					logger.Notice("%s: Renaming to %s_incomplete", config.streamname, l.filename)
 					missing = append(missing, r)
 					err := os.Rename(fmt.Sprint(config.binlogdir, "/", l.filename), fmt.Sprint(config.binlogdir, "/", l.filename, "_incomplete"))
 					if err != nil {
@@ -141,12 +143,12 @@ func checkMissingBinlogs(config Streamer) []Binlog {
 			missing = append(missing, r)
 		}
 	}
-    // This part is not too nice: if all the binlogs are exist locally, and their size is same, we don't should remove the last one
-    // and start streaming again from that, as it is easier than scanning through the binlog, and seeking for a position to start with
+	// if all the binlogs exists locally: discard the last one, and redownload
+	// this is suboptimal if binlogs are huge, but we don't have to seek
 	if len(missing) == 0 {
 		lastbinlog := config.localBinlogs[len(config.localBinlogs)-1]
-		logger.Warning("No binlogs are missing, removing last one, and start streaming again")
-		logger.Notice("Renaming %s", lastbinlog.filename)
+		logger.Warning("%s: No binlogs are missing, removing last one, and start streaming again", config.streamname)
+		logger.Notice("%s: Renaming %s", config.streamname, lastbinlog.filename)
 		err := os.Rename(fmt.Sprint(config.binlogdir, "/", lastbinlog.filename), fmt.Sprint(config.binlogdir, "/", lastbinlog.filename, "_redownload"))
 		if err != nil {
 			fmt.Println(err.Error())
@@ -159,7 +161,7 @@ func checkMissingBinlogs(config Streamer) []Binlog {
 
 func getLocalBinlogs(config Streamer) []Binlog {
 	var localBinlogs []Binlog
-	logger.Notice("Checking locally existing binlogs")
+	logger.Notice("%s: Checking locally existing binlogs", config.streamname)
 	files, err := ioutil.ReadDir(config.binlogdir)
 	if err != nil {
 		fmt.Println(err.Error())
@@ -179,7 +181,7 @@ func getRemoteBinlogs(config Streamer) []Binlog {
 	var fileSize int64
 	var remoteBinlogs []Binlog
 
-	logger.Notice("Checking remote binary logs")
+	logger.Notice("%s: Checking remote binary logs", config.streamname)
 	connecturi := fmt.Sprint(config.mysqluser, ":", config.mysqlpass, "@tcp(", config.mysqlhost, ":", config.mysqlport, ")/", config.mysqldb)
 	db, err := sql.Open("mysql", connecturi)
 	if err != nil {
@@ -228,8 +230,9 @@ func configure(configfile string) []Streamer {
 				daysKeep:    keep,
 			}
 			streamers = append(streamers, streamercfg)
-			logger.Notice("Configuration loaded successfully")
+			logger.Notice("Streamer %s created", streamercfg.streamname)
 		}
 	}
+	logger.Notice("Configuration loaded successfully")
 	return streamers
 }
