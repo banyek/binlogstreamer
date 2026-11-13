@@ -1,6 +1,6 @@
 # How to build binlogstreamer
 
-For building this project you can simply use GNU make.
+Building requires Go 1.24 or later. GNU make provides the following targets.
 
 ### Build the binlogstreamer for the current architecture
 If you want to build binlogstreamer for your current architecture, you can do that with a simple make command. 
@@ -23,7 +23,10 @@ You can explicit tell if the build target is Linux.
 
     > make linux
     
-### Remove all files  
-If you have changes in the code, before commiting to github you should remove all the files which were created during build.
+### Run tests
+
+    > make test
+
+### Remove the built binary
 
     > make clean
