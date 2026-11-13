@@ -78,11 +78,16 @@ func run(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	if err := recoverStagedBinlogs(ctx, cfg, matcher, remote); err != nil {
+		return err
+	}
 	local, err := listBinlogs(cfg.directory, matcher)
 	if err != nil {
 		return err
 	}
-	return streamBinlogs(ctx, cfg, matcher, startingBinlog(remote, local))
+	return streamBinlogs(ctx, cfg, matcher, startingBinlog(remote, local), directory, func(ctx context.Context) ([]binlog, error) {
+		return remoteBinlogs(ctx, cfg)
+	})
 }
 
 func binlogMatcher(remote []binlog) (*regexp.Regexp, error) {
@@ -195,8 +200,20 @@ func readBinlogs(rows *sql.Rows) ([]binlog, error) {
 		if !binlogName.MatchString(entry.name) || entry.size < 0 {
 			return nil, fmt.Errorf("invalid binary log entry %q with size %d", entry.name, entry.size)
 		}
-		if encrypted.Valid && !strings.EqualFold(encrypted.String, "No") {
-			return nil, fmt.Errorf("cannot compare encrypted binary log %q with its local backup", entry.name)
+		// MySQL includes its 512-byte encryption header in File_size,
+		// but mysqlbinlog receives the plaintext stream without that header.
+		const encryptionHeaderSize = 512
+		if encrypted.Valid {
+			switch strings.ToLower(encrypted.String) {
+			case "yes":
+				if entry.size < encryptionHeaderSize+4 {
+					return nil, fmt.Errorf("invalid encrypted binary log size for %q: %d", entry.name, entry.size)
+				}
+				entry.size -= encryptionHeaderSize
+			case "no":
+			default:
+				return nil, fmt.Errorf("unknown encryption status for binary log %q: %q", entry.name, encrypted.String)
+			}
 		}
 		logs = append(logs, entry)
 	}
@@ -248,7 +265,7 @@ func mysqlbinlogCommand(ctx context.Context, cfg configuration, staging, first s
 	)
 }
 
-func streamBinlogs(ctx context.Context, cfg configuration, matcher *regexp.Regexp, first string) error {
+func streamBinlogs(ctx context.Context, cfg configuration, matcher *regexp.Regexp, first string, lock *os.File, inventory func(context.Context) ([]binlog, error)) error {
 	staging, err := os.MkdirTemp(cfg.directory, ".binlogstreamer-")
 	if err != nil {
 		return fmt.Errorf("create staging directory: %w", err)
@@ -261,6 +278,10 @@ func streamBinlogs(ctx context.Context, cfg configuration, matcher *regexp.Regex
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	command := mysqlbinlogCommand(ctx, cfg, staging, first)
+	// A surviving child retains the directory lock if the parent is killed.
+	if lock != nil {
+		command.ExtraFiles = []*os.File{lock}
+	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
@@ -283,6 +304,17 @@ func streamBinlogs(ctx context.Context, cfg configuration, matcher *regexp.Regex
 		case err := <-done:
 			if _, publishErr := publishBinlogs(staging, cfg.directory, matcher); publishErr != nil {
 				return publishErr
+			}
+			// The stream context may have been canceled by SIGTERM. Use a
+			// separate bounded context to verify the closed output.
+			recoveryCtx, stopRecovery := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			remote, inventoryErr := inventory(recoveryCtx)
+			if inventoryErr == nil {
+				inventoryErr = recoverStagedDirectory(recoveryCtx, cfg, staging, matcher, remote)
+			}
+			stopRecovery()
+			if inventoryErr != nil {
+				log.Printf("Could not verify staged binary logs: %v", inventoryErr)
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -346,24 +378,8 @@ func publishBinlogs(staging, directory string, matcher *regexp.Regexp) (string, 
 		if !earlierBinlog(name, newest) {
 			continue
 		}
-		source := filepath.Join(staging, name)
-		target := filepath.Join(directory, name)
-		existing, err := os.Lstat(target)
-		if err == nil {
-			if !existing.Mode().IsRegular() {
-				return "", fmt.Errorf("cannot publish binary log over non-regular entry %q", target)
-			}
-			if existing.Size() == file.Size() {
-				if err := os.Remove(source); err != nil {
-					return "", fmt.Errorf("discard redundant staged binary log %q: %w", name, err)
-				}
-				continue
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("inspect existing binary log %q: %w", target, err)
-		}
-		if err := os.Rename(source, target); err != nil {
-			return "", fmt.Errorf("publish binary log %q: %w", name, err)
+		if err := publishBinlog(staging, directory, name, file.Size()); err != nil {
+			return "", err
 		}
 	}
 	return newest, nil
@@ -384,6 +400,79 @@ func cleanupBinlogs(cfg configuration, matcher *regexp.Regexp, active string, no
 		if err := os.Remove(filepath.Join(cfg.directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove expired binary log %q: %w", name, err)
 		}
+	}
+	return nil
+}
+
+func publishBinlog(staging, directory, name string, size int64) error {
+	source := filepath.Join(staging, name)
+	target := filepath.Join(directory, name)
+	existing, err := os.Lstat(target)
+	if err == nil {
+		if !existing.Mode().IsRegular() {
+			return fmt.Errorf("cannot publish binary log over non-regular entry %q", target)
+		}
+		if existing.Size() == size {
+			if err := os.Remove(source); err != nil {
+				return fmt.Errorf("discard redundant staged binary log %q: %w", name, err)
+			}
+			return nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect existing binary log %q: %w", target, err)
+	}
+	if err := os.Rename(source, target); err != nil {
+		return fmt.Errorf("publish binary log %q: %w", name, err)
+	}
+	return nil
+}
+
+func recoverStagedBinlogs(ctx context.Context, cfg configuration, matcher *regexp.Regexp, remote []binlog) error {
+	entries, err := os.ReadDir(cfg.directory)
+	if err != nil {
+		return fmt.Errorf("list staging directories: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".binlogstreamer-") {
+			continue
+		}
+		staging := filepath.Join(cfg.directory, entry.Name())
+		if err := recoverStagedDirectory(ctx, cfg, staging, matcher, remote); err != nil {
+			return err
+		}
+		// Nonempty directories may contain the only copy of unverified data.
+		if err := os.Remove(staging); err != nil && !errors.Is(err, syscall.ENOTEMPTY) {
+			return fmt.Errorf("remove empty staging directory: %w", err)
+		}
+	}
+	return nil
+}
+
+func recoverStagedDirectory(ctx context.Context, cfg configuration, staging string, matcher *regexp.Regexp, remote []binlog) error {
+	files, err := listBinlogs(staging, matcher)
+	if err != nil {
+		return err
+	}
+	for _, entry := range remote {
+		file := files[entry.name]
+		if file == nil || file.Size() != entry.size || entry.size <= 4 {
+			continue
+		}
+		// A matching size alone does not detect a corrupt or truncated event.
+		// mysqlbinlog parses the file and verifies any event checksums present.
+		path := filepath.Join(staging, entry.name)
+		command := exec.CommandContext(ctx, cfg.mysqlbinlog, "--no-defaults", "--verify-binlog-checksum", "--", path)
+		if err := command.Run(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			log.Printf("Could not validate staged binary log %q: %v", path, err)
+			continue
+		}
+		if err := publishBinlog(staging, cfg.directory, entry.name, entry.size); err != nil {
+			return err
+		}
+		log.Printf("Recovered staged binary log %s", entry.name)
 	}
 	return nil
 }

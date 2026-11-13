@@ -79,7 +79,9 @@ exit 1
 		t.Fatal(err)
 	}
 	matcher := regexp.MustCompile(`^binlog\.[0-9]+$`)
-	err := streamBinlogs(context.Background(), cfg, matcher, "binlog.000001")
+	err := streamBinlogs(context.Background(), cfg, matcher, "binlog.000001", nil, func(context.Context) ([]binlog, error) {
+		return []binlog{{"binlog.000002", 8}}, nil
+	})
 	if err == nil || !strings.Contains(err.Error(), "connection interrupted") {
 		t.Fatalf("want subprocess failure with stderr, got %v", err)
 	}
@@ -178,7 +180,8 @@ func TestReadBinlogs(t *testing.T) {
 	}{
 		{"two columns", two, []driver.Value{"binlog.000001", int64(42)}, nil, ""},
 		{"three columns", three, []driver.Value{"binlog.000001", int64(42), "No"}, nil, ""},
-		{"encrypted", three, []driver.Value{"binlog.000001", int64(42), "Yes"}, nil, "encrypted"},
+		{"encrypted", three, []driver.Value{"binlog.000001", int64(554), "Yes"}, nil, ""},
+		{"invalid encrypted size", three, []driver.Value{"binlog.000001", int64(42), "Yes"}, nil, "encrypted"},
 		{"invalid size", two, []driver.Value{"binlog.000001", "invalid"}, nil, "read binary log row"},
 		{"interrupted", two, []driver.Value{"binlog.000001", int64(42)}, errors.New("connection lost"), "connection lost"},
 		{"empty", two, nil, nil, ""},
@@ -240,5 +243,39 @@ func TestPublishBinlogs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, newest)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("active log was published or stat failed: %v", err)
+	}
+}
+
+func TestRecoverStagedBinlogs(t *testing.T) {
+	dir := t.TempDir()
+	staging, err := os.MkdirTemp(dir, ".binlogstreamer-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, staging, "binlog.000001", "complete")
+	writeFile(t, staging, "binlog.000002", "partial")
+	writeFile(t, staging, "binlog.000003", "bad-data")
+	writeFile(t, staging, "binlog.000004", "unknown!")
+	writeFile(t, dir, "binlog.000003", "keep")
+	validator := filepath.Join(t.TempDir(), "mysqlbinlog")
+	if err := os.WriteFile(validator, []byte("#!/bin/sh\nfor path do :; done\ngrep -qx complete \"$path\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configuration{directory: dir, mysqlbinlog: validator}
+	matcher := regexp.MustCompile(`^binlog\.[0-9]+$`)
+	remote := []binlog{{"binlog.000001", 8}, {"binlog.000002", 8}, {"binlog.000003", 8}}
+	if err := recoverStagedBinlogs(context.Background(), cfg, matcher, remote); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"binlog.000002", "binlog.000003", "binlog.000004"} {
+		if _, err := os.Stat(filepath.Join(staging, name)); err != nil {
+			t.Errorf("unverified staged file %q should be preserved: %v", name, err)
+		}
+	}
+	for name, want := range map[string]string{"binlog.000001": "complete", "binlog.000003": "keep"} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v, want %q", name, got, err, want)
+		}
 	}
 }
