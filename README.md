@@ -29,8 +29,13 @@ When the next log appears, the previous download can be published atomically.
 A complete local copy of the same size is kept. Retention applies to published
 logs older than the file currently being streamed.
 
-If the stream stops, the latest staged log stays in its staging directory.
-It may contain partial data. A restart starts a new download based on the
-published backups and leaves earlier staging directories available for manual
-recovery or removal. MySQL logs reported as encrypted cause startup to fail
-because their server file sizes differ from the streamed output.
+When the stream stops, binlogstreamer checks the latest staged file against
+the server inventory and verifies it with `mysqlbinlog` before publishing it.
+It retries this check at startup if the server was unavailable. A partial
+file stays in staging while the missing data is downloaded again from the
+server. If the server has already purged the log, its staged copy is kept
+for manual recovery.
+
+MySQL decrypts encrypted binary logs when it streams them. The local copies
+are plaintext, and binlogstreamer excludes the server's encryption header
+when comparing file sizes.
